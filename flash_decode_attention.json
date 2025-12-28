@@ -1,0 +1,31 @@
+[
+    {
+      "op": "FlashDecodeAttention",
+      "input_desc": [
+        { "name": "query_states", "param_type": "required",
+          "format": ["ND","ND","ND"],
+          "type": ["float16","bfloat16","float32"]
+        },
+        { "name": "key_states", "param_type": "required",
+          "format": ["ND","ND","ND"],
+          "type": ["float16","bfloat16","float32"]
+        },
+        { "name": "value_states", "param_type": "required",
+          "format": ["ND","ND","ND"],
+          "type": ["float16","bfloat16","float32"]
+        },
+        { "name": "o_weights", "param_type": "required", 
+          "format": ["ND","ND","ND"], 
+          "type": ["float16","bfloat16","float32"] 
+        }
+
+      ],
+      "output_desc": [
+        { "name": "attn_output", "param_type": "required",
+          "format": ["ND","ND","ND"],
+          "type": ["float16","bfloat16","float32"]
+        }
+      ]
+    }
+  ]
+  
