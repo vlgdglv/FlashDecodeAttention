@@ -62,7 +62,7 @@ static ge::graphStatus TilingFunc(gert::TilingContext* context){
     tiling.set_Skv(Sk);
     tiling.set_Dmodel(Dmodel);
 
-    uint32_t block_size = 128;
+    uint32_t block_size = 64;
     tiling.set_block_size(block_size);
 
     uint32_t total_heads = Bq * Hq;
@@ -92,6 +92,13 @@ static ge::graphStatus TilingFunc(gert::TilingContext* context){
     std::cout << "Wo1: " << Wo1 << std::endl;
     std::cout << "Dmodel: " << Dmodel << std::endl;
     std::cout << "inv_sqrt_dh: " << inv_sqrt_dh << std::endl;
+
+    size_t* workspaces = context->GetWorkspaceSizes(1);
+    if (workspaces == nullptr) {
+        return ge::GRAPH_FAILED;
+    }
+    // workspaces[0] =  systemWorkspaceSize + userWorkspaceSize;
+    workspaces[0] = 0;
 
     auto *raw = context->GetRawTilingData();
     tiling.SaveToBuffer(raw->GetData(), raw->GetCapacity());

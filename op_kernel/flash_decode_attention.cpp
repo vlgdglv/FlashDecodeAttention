@@ -1,6 +1,6 @@
 #include "kernel_operator.h"
 #include "kernel_tiling/kernel_tiling.h"
-#include "lib/matmul_intf.h"
+// #include "lib/matmul_intf.h"
 using namespace AscendC;
 
 #define BUFFER_NUM 2
@@ -26,7 +26,6 @@ public:
         Skv_ = tiling.Skv;
         Dh_  = tiling.Dh;
         Dmodel_ = tiling.Dmodel;
-
         block_dim_ = tiling.block_dim;
 
         // in MVP, each block only hanlde one head
@@ -36,13 +35,10 @@ public:
         inv_sqrt_dh_ = tiling.inv_sqrt_dh;
 
         block_idx_ = GetBlockIdx();
-
         total_heads_ = B_ * Hq_;
         total_blocks_ = (total_heads_ + heads_per_block_ - 1) / heads_per_block_;
 
-        head_begin_ = block_idx_ * heads_per_block_;
-        head_end_ = head_begin_ + heads_per_block_;
-        if (head_end_ > total_heads_) head_end_ = total_heads_;
+       
 
         // query: [B, Hq, Sq, Dh]
         // key/value: [B, Hkv, Skv, Dh]
@@ -59,9 +55,10 @@ public:
         pipe_.InitBuffer(kBuf_, block_size_ * Dh_ * sizeof(float)); // K block
         pipe_.InitBuffer(vBuf_, block_size_ * Dh_ * sizeof(float)); // V block
 
-        pipe_.InitBuffer(qInBuf_, Dh_ * sizeof(bfloat16_t*)); // 
-        pipe_.InitBuffer(kInBuf_, block_size_ * Dh_ * sizeof(float)); // K block
-        pipe_.InitBuffer(vInBuf_, block_size_ * Dh_ * sizeof(float)); // V block
+        pipe_.InitBuffer(qInBuf_, Dh_ * sizeof(bfloat16_t)); // 
+        pipe_.InitBuffer(kInBuf_, block_size_ * Dh_ * sizeof(bfloat16_t)); // K block
+        pipe_.InitBuffer(vInBuf_, block_size_ * Dh_ * sizeof(bfloat16_t)); // V block
+        pipe_.InitBuffer(outBuf_, Dh_ * sizeof(bfloat16_t));
 
         pipe_.InitBuffer(scoreBuf_, block_size_ * sizeof(float)); // scores fp32
         pipe_.InitBuffer(oBuf_, Dh_ * sizeof(float));          // o fp32
@@ -78,7 +75,12 @@ public:
 
     __aicore__ inline void Process(){
         // for safety
-        if (block_dim_ >= total_blocks_) return;
+        block_idx_ = GetBlockIdx();
+        head_begin_ = block_idx_ * heads_per_block_;
+        head_end_ = head_begin_ + heads_per_block_;
+        if (head_end_ > total_heads_) head_end_ = total_heads_;
+
+        if (block_idx_ >= total_blocks_) return;
 
         for (uint32_t gh = head_begin_; gh < head_end_; ++gh) {
             uint32_t b = gh / Hq_;
@@ -108,12 +110,16 @@ private:
         // --- 2) Init running softmax state (m, l, o[Dh]) ---
         float m = NEG_INF_F32;
         float l = 0.0f;
+
         LocalTensor<float> o_fp32 = oBuf_.AllocTensor<float>();  // size Dh
         Duplicate(o_fp32, 0.0f, Dh_);
+        PRINTF("block : %d, Dh_: %d\n", block_idx_, Dh_);
+        // for (uint32_t o = 0; o < Dh_; ++o) o_fp32.SetValue(o, 0.0f);
         
         LocalTensor<float> k_blk = kBuf_.AllocTensor<float>(); // [block_size, Dh]
         LocalTensor<float> v_blk = vBuf_.AllocTensor<float>();
-        LocalTensor<float> scores = scoreBuf_.Get<float>(); // [block_size]
+        LocalTensor<float> scores = scoreBuf_.AllocTensor<float>(); // [block_size]
+        LocalTensor<bfloat16_t> o_bf16 = outBuf_.AllocTensor<bfloat16_t>();
 
         // --- 3) Scan KV in blocks of block_size_ ---
         for (uint32_t t0 = 0; t0 < Skv_; t0 += block_size_) {
@@ -142,13 +148,19 @@ private:
 
         // --- 4) Normalize and store out[b,hq,s,:] ---
         float inv_l = 1.0f / l;
-        // StoreOutFromFp32(o_fp32, b, hq, s, inv_l);
+        Muls(o_fp32, o_fp32, inv_l, (int32_t)Dh_);
+
+        // // fp32 -> bf16
+        Cast(o_bf16, o_fp32, RoundMode::CAST_ROUND, (int32_t)Dh_);
+    
+        DataCopy(outGm_[(uint64_t)((b * Hq_ + hq) * Sq_ + s) * Dh_], o_bf16, (int32_t)Dh_);
 
         qBuf_.FreeTensor(q_fp32);
         oBuf_.FreeTensor(o_fp32);
         kBuf_.FreeTensor(k_blk);
         vBuf_.FreeTensor(v_blk);
         scoreBuf_.FreeTensor(scores);
+        outBuf_.FreeTensor(o_bf16);
     }
 
 private:
@@ -206,43 +218,42 @@ private:
         }
 
         ReduceMax(redRes, scores, work, (int32_t)tN);
+        float blk_max = redRes.GetValue(0);
 
         redResBuf.FreeTensor(redRes);
         prodBuf.FreeTensor(prod);
         redWorkBuf.FreeTensor(work);
 
-        return redRes.GetValue(0);
+        return blk_max;
     }
 
     __aicore__ inline float ExpScalar(float x){
-        LocalTensor<float> redRes = redResBuf.Get<float>(); 
+        LocalTensor<float> redRes = redResBuf.AllocTensor<float>(); 
         redRes.SetValue(0, x);
         Exp(redRes, redRes, (int32_t)1);
-        return redRes.GetValue(0); 
+        float ans = redRes.GetValue(0);
+        redResBuf.FreeTensor(redRes);
+        return ans; 
     }
 
     __aicore__ inline void AccumulateBlock(LocalTensor<float>& o_fp32,
         float& l,
-        const LocalTensor<float>& scores,
-        const LocalTensor<float>& v_blk,
+        LocalTensor<float>& scores,
+        LocalTensor<float>& v_blk,
         uint32_t tN,
         float m_new){
         
-        LocalTensor<float> redRes = redResBuf.Get<float>(); // [1]
+        LocalTensor<float> redRes = redResBuf.AllocTensor<float>(); // [1]
         LocalTensor<float> work = redWorkBuf.AllocTensor<float>();    // [D]
         
         Adds(scores, scores, -m_new, (int32_t)tN);
         Exp(scores, scores, (int32_t)tN);
         
-        // ReduceSum(redRes, scores, work, (int32_t)tN);
-        // l += redRes.GetValue(0);
+        ReduceSum(redRes, scores, work, (int32_t)tN);
+        l += redRes.GetValue(0);
         
         for (uint32_t j = 0; j < tN; ++j) {
             float pj = scores.GetValue(j);
-            l += pj;
-            // LocalTensor<float> v_row = v_blk;
-            // v_row.SetAddrOffset((int32_t)());
-            // 3) o_fp32 += pj * v_row
             Axpy(o_fp32, v_blk[j * Dh_], pj, (int32_t)Dh_);
         }
         redResBuf.FreeTensor(redRes);
@@ -276,9 +287,13 @@ private:
     TBuf<TPosition::VECCALC> scoreBuf_;  // block_size * fp32
     TBuf<TPosition::VECCALC> oBuf_;      // Dh * fp32
     TBuf<TPosition::VECCALC> tmpBuf_;    // Dh * fp32 (optional)
-    TBuf<TPosition::VECCALC> qInBuf_, kInBuf_, vInBuf_;
 
     TBuf<TPosition::VECCALC> kfBuf, prodBuf, redWorkBuf, redResBuf;
+
+    TBuf<TPosition::VECIN>  qInBuf_, kInBuf_, vInBuf_;
+    TBuf<TPosition::VECOUT> outBuf_;   // 如果你的版本区分输出
+    TBuf<TPosition::VECCALC> prodBuf_, redWorkBuf_, redResBuf_;
+
 
     // TQue<QuePosition::VECIN,  BUFFER_NUM> inQueueW;
     TQue<QuePosition::VECOUT, BUFFER_NUM> outQueueR;
