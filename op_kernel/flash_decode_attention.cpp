@@ -17,23 +17,23 @@ public:
         GM_ADDR o_weights,
         GM_ADDR attn_output,
         GM_ADDR workspace,
-        const optiling::FlashDecodeAttentionTilingData& tiling)
+        const FlashDecodeAttentionTilingData& tiling)
     {
-        B_   = tiling.get_B();
-        Hq_  = tiling.get_Hq();
-        Hkv_ = tiling.get_Hkv();
-        Sq_  = tiling.get_Sq();
-        Skv_ = tiling.get_Skv();
-        Dh_  = tiling.get_Dh();
-        Dmodel_ = tiling.get_Dmodel();
+        B_   = tiling.B;
+        Hq_  = tiling.Hq;
+        Hkv_ = tiling.Hkv;
+        Sq_  = tiling.Sq;
+        Skv_ = tiling.Skv;
+        Dh_  = tiling.Dh;
+        Dmodel_ = tiling.Dmodel;
 
-        block_dim_ = tiling.get_block_dim();
+        block_dim_ = tiling.block_dim;
 
         // in MVP, each block only hanlde one head
-        heads_per_block_ = tiling.get_heads_per_block(); 
+        heads_per_block_ = tiling.heads_per_block;
         
-        block_size_ = tiling.get_block_size();
-        inv_sqrt_dh_ = tiling.get_inv_sqrt_dh();
+        block_size_ = tiling.block_size;
+        inv_sqrt_dh_ = tiling.inv_sqrt_dh;
 
         block_idx_ = GetBlockIdx();
 
@@ -66,13 +66,14 @@ public:
         pipe_.InitBuffer(scoreBuf_, block_size_ * sizeof(float)); // scores fp32
         pipe_.InitBuffer(oBuf_, Dh_ * sizeof(float));          // o fp32
         pipe_.InitBuffer(tmpBuf_, Dh_ * sizeof(float));        // tmp fp32 (optional)
+        pipe_.InitBuffer(kfBuf, Dh_ * sizeof(float));
 
-        pipe_.InitBuffer(prodBuf, D * sizeof(float));
-        pipe_.InitBuffer(redWorkBuf, D * sizeof(float));
+        pipe_.InitBuffer(prodBuf, Dh_ * sizeof(float));
+        pipe_.InitBuffer(redWorkBuf, Dh_ * sizeof(float));
         pipe_.InitBuffer(redResBuf, 1 * sizeof(float));
 
         // pipe.InitBuffer(inQueueW, BUFFER_NUM, D * sizeof(bfloat16_t));    // w_row[D]
-        pipe.InitBuffer(outQueueR, BUFFER_NUM, 1 * sizeof(float));   
+        // pipe.InitBuffer(outQueueR, BUFFER_NUM, 1 * sizeof(float));   
     }
 
     __aicore__ inline void Process(){
@@ -109,6 +110,10 @@ private:
         float l = 0.0f;
         LocalTensor<float> o_fp32 = oBuf_.AllocTensor<float>();  // size Dh
         Duplicate(o_fp32, 0.0f, Dh_);
+        
+        LocalTensor<float> k_blk = kBuf_.AllocTensor<float>(); // [block_size, Dh]
+        LocalTensor<float> v_blk = vBuf_.AllocTensor<float>();
+        LocalTensor<float> scores = scoreBuf_.Get<float>(); // [block_size]
 
         // --- 3) Scan KV in blocks of block_size_ ---
         for (uint32_t t0 = 0; t0 < Skv_; t0 += block_size_) {
@@ -116,12 +121,9 @@ private:
             if (t0 + tN > Skv_) tN = Skv_ - t0;
 
             // 3.1 load K/V blocks to UB (bfloat16_t/bf16)
-            LocalTensor<bfloat16_t> k_blk = kBuf_.AllocTensor<bfloat16_t>(); // [block_size, Dh]
-            LocalTensor<bfloat16_t> v_blk = vBuf_.AllocTensor<bfloat16_t>();
             LoadKVBlock(k_blk, v_blk, b, hk, t0, tN);
 
             // 3.2 compute scores[tN] in fp32 and find block max
-            LocalTensor<float> scores = scoreBuf_.Get<float>(); // [block_size]
             float blk_max = ComputeScoresAndMax(scores, q_fp32, k_blk, tN);
 
             // 3.3 update running max and rescale old accumulators
@@ -140,7 +142,13 @@ private:
 
         // --- 4) Normalize and store out[b,hq,s,:] ---
         float inv_l = 1.0f / l;
-        StoreOutFromFp32(o_fp32, b, hq, s, inv_l);
+        // StoreOutFromFp32(o_fp32, b, hq, s, inv_l);
+
+        qBuf_.FreeTensor(q_fp32);
+        oBuf_.FreeTensor(o_fp32);
+        kBuf_.FreeTensor(k_blk);
+        vBuf_.FreeTensor(v_blk);
+        scoreBuf_.FreeTensor(scores);
     }
 
 private:
@@ -155,7 +163,8 @@ private:
         qInBuf_.FreeTensor(q_bf16);
     }
 
-    __aicore__ inline void LoadKVBlock(LocalTensor<float>& k_blk,
+    __aicore__ inline void LoadKVBlock(
+        LocalTensor<float>& k_blk,
         LocalTensor<float>& v_blk,
         uint32_t b, uint32_t hk,
         uint32_t t0, uint32_t tN){
@@ -179,16 +188,18 @@ private:
 
     __aicore__ inline float ComputeScoresAndMax(LocalTensor<float>& scores,
         const LocalTensor<float>& q_fp32,
-        const LocalTensor<half>& k_blk,
+        const LocalTensor<float>& k_blk,
         uint32_t tN){
         // scores: [tN]
         // q_fp32: [Dh]
         // k_blk: [tN, Dh]
         LocalTensor<float> prod = prodBuf.AllocTensor<float>();    // [D]
         LocalTensor<float> work = redWorkBuf.AllocTensor<float>();    // [D]
-        LocalTensor<float> redRes = redResBuf.Get<float>(); // [1]
-        
+        LocalTensor<float> redRes = redResBuf.AllocTensor<float>(); // [1]
+        LocalTensor<float> k_piece = kfBuf.AllocTensor<float>();    // [Dh]
+
         for(int j = 0; j < tN; j++){
+            // Copy(k_piece, , (int32_t)Dh_);
             Mul(prod, q_fp32, k_blk[j * Dh_], (int32_t)Dh_);
             ReduceSum(redRes, prod, work, (int32_t)Dh_);
             scores.SetValue(j, redRes.GetValue(0) * inv_sqrt_dh_);
@@ -223,12 +234,17 @@ private:
         Adds(scores, scores, -m_new, (int32_t)tN);
         Exp(scores, scores, (int32_t)tN);
         
-        ReduceSum(redRes, scores, work, (int32_t)tN);
-        l += redRes.GetValue(0);
+        // ReduceSum(redRes, scores, work, (int32_t)tN);
+        // l += redRes.GetValue(0);
         
-        Mul(scores, scores, v_blk, (int32_t)tN);
-        Mul(o_fp32, o_fp32, scores, (int32_t)tN);
-
+        for (uint32_t j = 0; j < tN; ++j) {
+            float pj = scores.GetValue(j);
+            l += pj;
+            // LocalTensor<float> v_row = v_blk;
+            // v_row.SetAddrOffset((int32_t)());
+            // 3) o_fp32 += pj * v_row
+            Axpy(o_fp32, v_blk[j * Dh_], pj, (int32_t)Dh_);
+        }
         redResBuf.FreeTensor(redRes);
         redWorkBuf.FreeTensor(work);
     }
@@ -262,7 +278,7 @@ private:
     TBuf<TPosition::VECCALC> tmpBuf_;    // Dh * fp32 (optional)
     TBuf<TPosition::VECCALC> qInBuf_, kInBuf_, vInBuf_;
 
-    TBuf<TPosition::VECCALC> wfBuf, prodBuf, redWorkBuf, redResBuf;
+    TBuf<TPosition::VECCALC> kfBuf, prodBuf, redWorkBuf, redResBuf;
 
     // TQue<QuePosition::VECIN,  BUFFER_NUM> inQueueW;
     TQue<QuePosition::VECOUT, BUFFER_NUM> outQueueR;
