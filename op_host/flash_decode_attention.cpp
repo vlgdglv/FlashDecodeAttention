@@ -62,7 +62,7 @@ static ge::graphStatus TilingFunc(gert::TilingContext* context){
     tiling.set_Skv(Sk);
     tiling.set_Dmodel(Dmodel);
 
-    uint32_t block_size = 64;
+    uint32_t block_size = 32;
     tiling.set_block_size(block_size);
 
     uint32_t total_heads = Bq * Hq;
@@ -73,32 +73,30 @@ static ge::graphStatus TilingFunc(gert::TilingContext* context){
 
     context->SetBlockDim(block_dim);
 
-    // the famous 1/sqrt(Dh)
     float inv_sqrt_dh = 1.0f / std::sqrt(Dhq);
     tiling.set_inv_sqrt_dh(inv_sqrt_dh);
     
-    std::cout << "[TilingFunc]:" << std::endl;
-    std::cout << "B: " << Bq << std::endl;
-    std::cout << "Hq: " << Hq << std::endl;
-    std::cout << "Sq: " << Sq << std::endl;
-    std::cout << "Dhq: " << Dhq << std::endl;
-    std::cout << "Hk: " << Hk << std::endl;
-    std::cout << "Sk: " << Sk << std::endl;
-    std::cout << "Dhk: " << Dhk << std::endl;
-    std::cout << "Hv: " << Hv << std::endl;
-    std::cout << "Sv: " << Sv << std::endl;
-    std::cout << "Dhv: " << Dhv << std::endl;
-    std::cout << "Wo0: " << Wo0 << std::endl;
-    std::cout << "Wo1: " << Wo1 << std::endl;
-    std::cout << "Dmodel: " << Dmodel << std::endl;
-    std::cout << "inv_sqrt_dh: " << inv_sqrt_dh << std::endl;
+    // std::cout << "[TilingFunc]:" << std::endl;
+    // std::cout << "B: " << Bq << std::endl;
+    // std::cout << "Hq: " << Hq << std::endl;
+    // std::cout << "Sq: " << Sq << std::endl;
+    // std::cout << "Dhq: " << Dhq << std::endl;
+    // std::cout << "Hk: " << Hk << std::endl;
+    // std::cout << "Sk: " << Sk << std::endl;
+    // std::cout << "Dhk: " << Dhk << std::endl;
+    // std::cout << "Hv: " << Hv << std::endl;
+    // std::cout << "Sv: " << Sv << std::endl;
+    // std::cout << "Dhv: " << Dhv << std::endl;
+    // std::cout << "Wo0: " << Wo0 << std::endl;
+    // std::cout << "Wo1: " << Wo1 << std::endl;
+    // std::cout << "Dmodel: " << Dmodel << std::endl;
+    // std::cout << "inv_sqrt_dh: " << inv_sqrt_dh << std::endl;
 
-    size_t* workspaces = context->GetWorkspaceSizes(1);
-    if (workspaces == nullptr) {
-        return ge::GRAPH_FAILED;
-    }
-    // workspaces[0] =  systemWorkspaceSize + userWorkspaceSize;
-    workspaces[0] = 0;
+    // size_t* workspaces = context->GetWorkspaceSizes(1);
+    // if (workspaces == nullptr) {
+    //     return ge::GRAPH_FAILED;
+    // }
+    // workspaces[0] = 0;
 
     auto *raw = context->GetRawTilingData();
     tiling.SaveToBuffer(raw->GetData(), raw->GetCapacity());

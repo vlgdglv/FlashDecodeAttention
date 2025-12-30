@@ -113,7 +113,6 @@ private:
 
         LocalTensor<float> o_fp32 = oBuf_.AllocTensor<float>();  // size Dh
         Duplicate(o_fp32, 0.0f, Dh_);
-        PRINTF("block : %d, Dh_: %d\n", block_idx_, Dh_);
         // for (uint32_t o = 0; o < Dh_; ++o) o_fp32.SetValue(o, 0.0f);
         
         LocalTensor<float> k_blk = kBuf_.AllocTensor<float>(); // [block_size, Dh]
@@ -291,7 +290,7 @@ private:
     TBuf<TPosition::VECCALC> kfBuf, prodBuf, redWorkBuf, redResBuf;
 
     TBuf<TPosition::VECIN>  qInBuf_, kInBuf_, vInBuf_;
-    TBuf<TPosition::VECOUT> outBuf_;   // 如果你的版本区分输出
+    TBuf<TPosition::VECOUT> outBuf_;
     TBuf<TPosition::VECCALC> prodBuf_, redWorkBuf_, redResBuf_;
 
 

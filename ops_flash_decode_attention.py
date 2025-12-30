@@ -1,3 +1,4 @@
+import os
 import numpy as np
 import time
 import math
@@ -78,13 +79,13 @@ class FlashDecodeAttentionNet(Cell):
 from mindspore import Profiler
 from mindspore.profiler import ProfilerLevel, ProfilerActivity, AicoreMetrics
     
-# profiler = Profiler(
-#     output_path=os.path.join("/home/ma-user/work/testplace/profiler_out", "profile_ops_headwise"),
-#     profiler_level=ProfilerLevel.Level1,
-#     activities=[ProfilerActivity.NPU],
-#     aic_metrics=AicoreMetrics.PipeUtilization,
-#     start_profile=False,
-# )
+profiler = Profiler(
+    output_path=os.path.join("/home/ma-user/work/FlashDecodeAttention/profiler_out", "eager"),
+    profiler_level=ProfilerLevel.Level1,
+    activities=[ProfilerActivity.NPU],
+    aic_metrics=AicoreMetrics.PipeUtilization,
+    start_profile=False,
+)
 
 def eager_calcs(query_states, key_states, value_states, o_weights):
     query_states = query_states.to(ms.float32)
@@ -129,16 +130,16 @@ if __name__ == "__main__":
     value_states = Tensor(ms.numpy.randn(B, num_heads, Skv, Dh), mstype.bfloat16)
     o_weights = Tensor(ms.numpy.randn(D, D), mstype.bfloat16)
     
-    # profiler.start()
+    profiler.start()
     ms.runtime.synchronize()        
     t0 = time.perf_counter()
     for _ in range(1):
         attn_output = net(query_states, key_states, value_states, o_weights)
-
+        
     ms.runtime.synchronize()        
     t1 = time.perf_counter()
-    # profiler.stop()
-    # profiler.analyse()
+    profiler.stop()
+    profiler.analyse()
     
     memory_allocated = ms.runtime.max_memory_allocated()/10**9
     memory_reserved = ms.runtime.max_memory_reserved()/10**9
@@ -147,12 +148,12 @@ if __name__ == "__main__":
     print("Ops shape:", attn_output.shape, "Time:", t1-t0)
     print(attn_output)
     
-    # Eager calcs:
-    ms.runtime.synchronize()        
-    t0 = time.perf_counter()
-    attn_output_eager = eager_calcs(query_states, key_states, value_states, o_weights)
+    # # Eager calcs:
+    # ms.runtime.synchronize()        
+    # t0 = time.perf_counter()
+    # attn_output_eager = eager_calcs(query_states, key_states, value_states, o_weights)
     
-    ms.runtime.synchronize()        
-    t1 = time.perf_counter()
-    print("Eager shape:", attn_output_eager.shape, "Time:", t1-t0)
-    print(attn_output_eager)
+    # ms.runtime.synchronize()        
+    # t1 = time.perf_counter()
+    # print("Eager shape:", attn_output_eager.shape, "Time:", t1-t0)
+    # print(attn_output_eager)
