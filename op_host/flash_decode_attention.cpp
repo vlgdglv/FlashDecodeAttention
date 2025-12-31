@@ -62,7 +62,7 @@ static ge::graphStatus TilingFunc(gert::TilingContext* context){
     tiling.set_Skv(Sk);
     tiling.set_Dmodel(Dmodel);
 
-    uint32_t block_size = 32;
+    uint32_t block_size = 8;
     tiling.set_block_size(block_size);
 
     uint32_t total_heads = Bq * Hq;
@@ -73,8 +73,7 @@ static ge::graphStatus TilingFunc(gert::TilingContext* context){
 
     context->SetBlockDim(block_dim);
 
-    float inv_sqrt_dh = 1.0f / std::sqrt(Dhq);
-    tiling.set_inv_sqrt_dh(inv_sqrt_dh);
+    tiling.set_inv_sqrt_dh((float)(1.0f / std::sqrt((double)Dhq)));
     
     // std::cout << "[TilingFunc]:" << std::endl;
     // std::cout << "B: " << Bq << std::endl;

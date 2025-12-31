@@ -4,9 +4,11 @@
 using namespace AscendC;
 
 #define BUFFER_NUM 2
-#define NEG_INF_F32 -1e29f
+// #define NEG_INF_F32 -1e29f
+constexpr float NEG_INF_F32 = -1.0e29f;
 
 class FlashDecodeAttention {
+
 public:
     __aicore__ inline FlashDecodeAttention() {}
 
@@ -38,8 +40,6 @@ public:
         total_heads_ = B_ * Hq_;
         total_blocks_ = (total_heads_ + heads_per_block_ - 1) / heads_per_block_;
 
-       
-
         // query: [B, Hq, Sq, Dh]
         // key/value: [B, Hkv, Skv, Dh]
         // out: [B, Hq, Sq, Dh]
@@ -48,8 +48,6 @@ public:
         vGm_.SetGlobalBuffer((__gm__ bfloat16_t*)value_states);
         wOGm_.SetGlobalBuffer((__gm__ bfloat16_t*)o_weights);
         outGm_.SetGlobalBuffer((__gm__ bfloat16_t*)attn_output);
-
-        // workspaceGm_.SetGlobalBuffer((__gm__ uint8_t*)workspace, 0);
 
         pipe_.InitBuffer(qBuf_, Dh_ * sizeof(float)); // q_fp32 (Dh float)
         pipe_.InitBuffer(kBuf_, block_size_ * Dh_ * sizeof(float)); // K block
@@ -66,12 +64,18 @@ public:
         pipe_.InitBuffer(kfBuf, Dh_ * sizeof(float));
 
         pipe_.InitBuffer(prodBuf, Dh_ * sizeof(float));
-        pipe_.InitBuffer(redWorkBuf, Dh_ * sizeof(float));
+        pipe_.InitBuffer(dotWorkBuf_, Dh_ * sizeof(float));
+        pipe_.InitBuffer(scoreWorkBuf_, block_size_ * sizeof(float));
+
+
         pipe_.InitBuffer(redResBuf, 1 * sizeof(float));
+
+        pipe_.InitBuffer(tmpBuf_bf16_, Dh_ * sizeof(bfloat16_t));
 
         // pipe.InitBuffer(inQueueW, BUFFER_NUM, D * sizeof(bfloat16_t));    // w_row[D]
         // pipe.InitBuffer(outQueueR, BUFFER_NUM, 1 * sizeof(float));   
     }
+
 
     __aicore__ inline void Process(){
         // for safety
@@ -113,6 +117,7 @@ private:
 
         LocalTensor<float> o_fp32 = oBuf_.AllocTensor<float>();  // size Dh
         Duplicate(o_fp32, 0.0f, Dh_);
+
         // for (uint32_t o = 0; o < Dh_; ++o) o_fp32.SetValue(o, 0.0f);
         
         LocalTensor<float> k_blk = kBuf_.AllocTensor<float>(); // [block_size, Dh]
@@ -124,6 +129,7 @@ private:
         for (uint32_t t0 = 0; t0 < Skv_; t0 += block_size_) {
             uint32_t tN = block_size_;
             if (t0 + tN > Skv_) tN = Skv_ - t0;
+            Duplicate(scores, NEG_INF_F32, (int32_t)block_size_);
 
             // 3.1 load K/V blocks to UB (bfloat16_t/bf16)
             LoadKVBlock(k_blk, v_blk, b, hk, t0, tN);
@@ -137,15 +143,19 @@ private:
 
             l *= scale;
             Muls(o_fp32, o_fp32, scale, Dh_);
-
+            
             // 3.4 accumulate this block
-            // p = exp(scores[j] - m_new)
             AccumulateBlock(o_fp32, l, scores, v_blk, tN, m_new);
 
             m = m_new;
         }
 
         // --- 4) Normalize and store out[b,hq,s,:] ---
+        if (!(l > 0.0f) || (l != l)) {   // l<=0 or NaN
+            // PRINTF("l=%f, --------------------------------------------------------------- \n",l);
+            Duplicate(o_fp32, 0.0f, Dh_);
+            l = 1.0f;
+        }
         float inv_l = 1.0f / l;
         Muls(o_fp32, o_fp32, inv_l, (int32_t)Dh_);
 
@@ -197,7 +207,8 @@ private:
         vInBuf_.FreeTensor(v_bf16);
     }
 
-    __aicore__ inline float ComputeScoresAndMax(LocalTensor<float>& scores,
+    __aicore__ inline float ComputeScoresAndMax(
+        LocalTensor<float>& scores,
         const LocalTensor<float>& q_fp32,
         const LocalTensor<float>& k_blk,
         uint32_t tN){
@@ -205,24 +216,33 @@ private:
         // q_fp32: [Dh]
         // k_blk: [tN, Dh]
         LocalTensor<float> prod = prodBuf.AllocTensor<float>();    // [D]
-        LocalTensor<float> work = redWorkBuf.AllocTensor<float>();    // [D]
+        LocalTensor<float> redSumWork = dotWorkBuf_.AllocTensor<float>();    // [Dh]
+        LocalTensor<float> redMaxwork = scoreWorkBuf_.AllocTensor<float>();    // [tN]
         LocalTensor<float> redRes = redResBuf.AllocTensor<float>(); // [1]
-        LocalTensor<float> k_piece = kfBuf.AllocTensor<float>();    // [Dh]
+        LocalTensor<float> k_row = kfBuf.AllocTensor<float>();
 
         for(int j = 0; j < tN; j++){
-            // Copy(k_piece, , (int32_t)Dh_);
-            Mul(prod, q_fp32, k_blk[j * Dh_], (int32_t)Dh_);
-            ReduceSum(redRes, prod, work, (int32_t)Dh_);
-            scores.SetValue(j, redRes.GetValue(0) * inv_sqrt_dh_);
-        }
+            // Copy(k_row, k_blk[j * Dh_], 64, 2, {1, 1, 8, 8});
 
-        ReduceMax(redRes, scores, work, (int32_t)tN);
+            Mul(prod, q_fp32, k_blk[j * Dh_], (int32_t)Dh_);
+            ReduceSum(redRes, prod, redSumWork, (int32_t)Dh_);
+
+            // pipe_barrier(PIPE_ALL);
+            float val = redRes.GetValue(0) * inv_sqrt_dh_;
+            scores.SetValue(j, val);
+        }
+        
+        // pipe_barrier(PIPE_ALL);
+        ReduceMax(redRes, scores, redMaxwork, (int32_t)tN);
+        
+        // pipe_barrier(PIPE_ALL);
         float blk_max = redRes.GetValue(0);
 
         redResBuf.FreeTensor(redRes);
         prodBuf.FreeTensor(prod);
-        redWorkBuf.FreeTensor(work);
-
+        dotWorkBuf_.FreeTensor(redSumWork);
+        scoreWorkBuf_.FreeTensor(redMaxwork);
+        kfBuf.FreeTensor(k_row);
         return blk_max;
     }
 
@@ -243,20 +263,34 @@ private:
         float m_new){
         
         LocalTensor<float> redRes = redResBuf.AllocTensor<float>(); // [1]
-        LocalTensor<float> work = redWorkBuf.AllocTensor<float>();    // [D]
+        LocalTensor<float> redSumwork = scoreWorkBuf_.AllocTensor<float>();    // [tN]
         
+        // refreshBF16(scores, (int32_t)tN);
+
         Adds(scores, scores, -m_new, (int32_t)tN);
         Exp(scores, scores, (int32_t)tN);
-        
-        ReduceSum(redRes, scores, work, (int32_t)tN);
+
+        // refreshBF16(scores, (int32_t)tN);
+
+        ReduceSum(redRes, scores, redSumwork, (int32_t)tN);
         l += redRes.GetValue(0);
         
         for (uint32_t j = 0; j < tN; ++j) {
             float pj = scores.GetValue(j);
             Axpy(o_fp32, v_blk[j * Dh_], pj, (int32_t)Dh_);
         }
+
+        // refreshBF16(o_fp32, (int32_t)Dh_);
+
         redResBuf.FreeTensor(redRes);
-        redWorkBuf.FreeTensor(work);
+        scoreWorkBuf_.FreeTensor(redSumwork);
+    }
+
+    __aicore__ inline void refreshBF16(LocalTensor<float>& target, uint32_t length){
+        LocalTensor<bfloat16_t> tmp_bf16 = tmpBuf_bf16_.AllocTensor<bfloat16_t>();
+        Cast(tmp_bf16, target, RoundMode::CAST_ROUND, length);
+        Cast(target, tmp_bf16, RoundMode::CAST_NONE, length);
+        tmpBuf_bf16_.FreeTensor(tmp_bf16);
     }
 
 private:
@@ -287,15 +321,16 @@ private:
     TBuf<TPosition::VECCALC> oBuf_;      // Dh * fp32
     TBuf<TPosition::VECCALC> tmpBuf_;    // Dh * fp32 (optional)
 
-    TBuf<TPosition::VECCALC> kfBuf, prodBuf, redWorkBuf, redResBuf;
+    TBuf<TPosition::VECCALC> kfBuf, prodBuf, redResBuf;
+    TBuf<TPosition::VECCALC> dotWorkBuf_, scoreWorkBuf_;
 
     TBuf<TPosition::VECIN>  qInBuf_, kInBuf_, vInBuf_;
     TBuf<TPosition::VECOUT> outBuf_;
-    TBuf<TPosition::VECCALC> prodBuf_, redWorkBuf_, redResBuf_;
+    TBuf<TPosition::VECCALC> prodBuf_, redWorkBuf_, redResBuf_, tmpBuf_bf16_;
 
 
     // TQue<QuePosition::VECIN,  BUFFER_NUM> inQueueW;
-    TQue<QuePosition::VECOUT, BUFFER_NUM> outQueueR;
+    // TQue<QuePosition::VECOUT, BUFFER_NUM> outQueueR;
 };
 
     

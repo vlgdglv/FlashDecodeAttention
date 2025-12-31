@@ -123,6 +123,7 @@ class FlashDeodeTester:
                 f"q {d['query_states'].shape}, k {d['key_states'].shape}, v {d['value_states'].shape}",
                 end="\r"
             )
+        print()
 
     def run_func(self, func, WARMUP=3, REPEAT=10):
         """
@@ -222,10 +223,10 @@ def stat_latency(ts):
     }
     
 def eager_attn(query_states, key_states, value_states, o_weights):
-    query_states = query_states.to(ms.float32)
-    key_states = key_states.to(ms.float32)
-    value_states = value_states.to(ms.float32)
-    o_weights = o_weights.to(ms.float32)
+    # query_states = query_states.to(ms.float32)
+    # key_states = key_states.to(ms.float32)
+    # value_states = value_states.to(ms.float32)
+    # o_weights = o_weights.to(ms.float32)
 
     bsz, q_len, num_heads, head_dim = 1, 1, 32, 128
     attn_weights = core_ops.matmul(query_states, core_ops.transpose(key_states, 2, 3)) / math.sqrt(head_dim)
@@ -278,7 +279,8 @@ class FlashDecodeAttentionNet(Cell):
         self.flash_decode_attention = ops.Custom(
             func=func,
             out_shape=out_shape_fn,
-            out_dtype=out_dtype_fn,
+            # out_dtype=out_dtype_fn,
+            out_dtype=mstype.bfloat16,
             func_type="aot",
             bprop=None,
             reg_info=reg_info
@@ -327,8 +329,8 @@ if __name__ == "__main__":
         
         # evaluator.evaluate(fused_mint_qkvProjTrans)
         
-        print(">>> Custom Ops " * 6)
+        print(">>> Custom Ops " * 8)
         evaluator.evaluate(ops_impl)
         
-        print(">>> Original Eager" * 6)
+        print(">>> Original Eager" * 8)
         evaluator.evaluate(eager_attn)
