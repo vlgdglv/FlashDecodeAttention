@@ -15,46 +15,6 @@ from mindspore.ops import operations as P
 import mindspore.common.dtype as mstype
 
 
-NUM_HEADS = 32
-HEAD_DIM = 128
-INPUT_TYPE = "sep"
-
-def check_test_data():
-    test_data_dir = "/home/ma-user/work/task1/task1/test_data/sample_flashAttn"
-    
-    test_activation_dir = "/home/ma-user/work/task1/test_data/sample_flashAttn/activation"
-    layer_idx, sample_idx = 0, 0
-    
-    print("========= check test data activation ========= ")
-    
-    attn_output = np.load(os.path.join(test_activation_dir, f"Janus_Pro_7B_layer{layer_idx}_sample{sample_idx}_attn_output.npy"))
-    query_states = np.load(os.path.join(test_activation_dir,  f"Janus_Pro_7B_layer{layer_idx}_sample{sample_idx}_query_states.npy"))
-    key_states = np.load(os.path.join(test_activation_dir,  f"Janus_Pro_7B_layer{layer_idx}_sample{sample_idx}_key_states.npy"))
-    value_states = np.load(os.path.join(test_activation_dir, f"Janus_Pro_7B_layer{layer_idx}_sample{sample_idx}_value_states.npy"))
-    
-    # print(hidden_states.dtype, query_states.dtype, key_states.dtype, value_states.dtype)
-    # print(hidden_states.shape, query_states.shape, key_states.shape, value_states.shape)
-    
-    attn_output_ms = ms.Tensor(attn_output, ms.bfloat16) # [1, SEQ_LEN, HIDDEN_DIM]
-    query_states_ms = ms.Tensor(query_states, ms.bfloat16)   # [1, HEAD_NUM, SEQ_LEN, HEAD_DIM]
-    key_states_ms = ms.Tensor(key_states, ms.bfloat16)       # [1, HEAD_NUM, SEQ_LEN, HEAD_DIM]
-    value_states_ms = ms.Tensor(value_states, ms.bfloat16)   # [1, HEAD_NUM, SEQ_LEN, HEAD_DIM]
-    
-    print(attn_output_ms.dtype, query_states_ms.dtype, key_states_ms.dtype, value_states_ms.dtype)
-    print(attn_output_ms.shape, query_states_ms.shape, key_states_ms.shape, value_states_ms.shape)
-
-
-    test_weights_dir = "/home/ma-user/work/task1/test_data/sample_flashAttn/weight"
-    print("========= check test data activation ========= ")
-
-    o_proj_weight = np.load(os.path.join(test_weights_dir, f"Janus_Pro_7B_layer{layer_idx}_o_proj_weight.npy"))
-    
-    o_proj_weight = ms.Tensor(o_proj_weight, ms.bfloat16)    # [HIDDEN_DIM, HIDDEN_DIM]
-    
-    print(o_proj_weight.dtype)
-    print(o_proj_weight.shape)
-
-
 class FlashDeodeTester:
     def __init__(
         self,
@@ -62,6 +22,7 @@ class FlashDeodeTester:
         num_layers: int,
         sample_idx: int = 0,
         dtype=ms.bfloat16,
+        model_name = "QWen_VL"
     ):
         self.base_dir = base_dir
         self.activation_dir = os.path.join(base_dir, "activation")
@@ -69,6 +30,7 @@ class FlashDeodeTester:
         self.num_layers = num_layers
         self.sample_idx = sample_idx
         self.dtype = dtype
+        self.model_name = model_name
 
         # data[layer_idx] = {
         #   "hidden_states", "query_states", "key_states", "value_states",
@@ -79,7 +41,7 @@ class FlashDeodeTester:
 
     def _load_one_layer(self, layer_idx: int):
         sample_idx = self.sample_idx
-        prefix = f"Janus_Pro_7B_layer{layer_idx}_sample{sample_idx}"
+        prefix = f"{self.model_name}_layer{layer_idx}_sample{sample_idx}"
 
         # activation
         attn_output = np.load(
@@ -95,7 +57,7 @@ class FlashDeodeTester:
             os.path.join(self.activation_dir, f"{prefix}_value_states.npy")
         )
         o_proj_weight = np.load(
-            os.path.join(self.weight_dir, f"Janus_Pro_7B_layer{layer_idx}_o_proj_weight.npy")
+            os.path.join(self.weight_dir, f"{self.model_name}_layer{layer_idx}_o_proj_weight.npy")
         )
 
         attn_output_ms = ms.Tensor(attn_output, self.dtype)
@@ -147,13 +109,10 @@ class FlashDeodeTester:
             for _ in range(REPEAT):
                 t0 = time.perf_counter()
                 attn_output = func(query_states, key_states, value_states, o_proj_weight)
-                ms.runtime.synchronize()
+                # ms.runtime.synchronize()
                 t1 = time.perf_counter()
                 exec_time.append(t1 - t0)
-
-            # per_call = (t1 - t0) / REPEAT
-            # exec_time.append(per_call)
-
+            ms.runtime.synchronize()
             preds[layer_idx] = attn_output
         return preds, exec_time
 
@@ -227,8 +186,19 @@ def eager_attn(query_states, key_states, value_states, o_weights):
     # key_states = key_states.to(ms.float32)
     # value_states = value_states.to(ms.float32)
     # o_weights = o_weights.to(ms.float32)
+    
+    def repeat_kv(hidden_states, n_rep):
+        batch, num_key_value_heads, slen, head_dim = hidden_states.shape
+        if n_rep == 1:
+            return hidden_states
+        hidden_states = hidden_states[:, :, None, :, :].broadcast_to((batch, num_key_value_heads, n_rep, slen, head_dim))
+        return hidden_states.reshape(batch, num_key_value_heads * n_rep, slen, head_dim)
 
-    bsz, q_len, num_heads, head_dim = 1, 1, 32, 128
+    num_key_value_groups = 6
+    bsz, q_len, num_heads, head_dim = 1, 1, 12, 128
+    key_states = repeat_kv(key_states, num_key_value_groups)
+    value_states = repeat_kv(value_states, num_key_value_groups)
+    
     attn_weights = core_ops.matmul(query_states, core_ops.transpose(key_states, 2, 3)) / math.sqrt(head_dim)
 
     # upcast attention to fp32
@@ -279,7 +249,6 @@ class FlashDecodeAttentionNet(Cell):
         self.flash_decode_attention = ops.Custom(
             func=func,
             out_shape=out_shape_fn,
-            # out_dtype=out_dtype_fn,
             out_dtype=mstype.bfloat16,
             func_type="aot",
             bprop=None,
@@ -292,19 +261,17 @@ class FlashDecodeAttentionNet(Cell):
                   value_states,
                   o_weights,
                   ):
-        # print(">>> before fused_qkv")
         attn_output = self.flash_decode_attention(
             query_states, 
             key_states, 
             value_states, 
             o_weights
             )
-        # print(">>> after fused_qkv")
         return attn_output
-    
+
 opsNet = FlashDecodeAttentionNet(
     func="FlashDecodeAttention",
-    o_shape=(1, 1, 4096),
+    o_shape=(1, 1, 1536),
 )
 
 def ops_impl(query_states, key_states, value_states, o_weights):
@@ -312,22 +279,22 @@ def ops_impl(query_states, key_states, value_states, o_weights):
     attn_output = ms.mint.nn.functional.linear(attn_output, o_weights, None)
     return attn_output
 
-ms.set_context(
+context.set_context(
     mode=ms.GRAPH_MODE,
-    device_target="Ascend"
-    )
-print(ms.get_context("mode"))
+    # jit_config={"jit_level": "O0"},
+    device_target="Ascend",
+)
+
 
 if __name__ == "__main__":
     for idx in [3, 12, 43]:
+        
         evaluator = FlashDeodeTester(
             base_dir="/home/ma-user/work/task1/test_data/sample_flashAttn", 
-            num_layers=30, 
+            num_layers=28, 
             sample_idx=idx, 
             dtype=ms.bfloat16
         )
-        
-        # evaluator.evaluate(fused_mint_qkvProjTrans)
         
         print(">>> Custom Ops " * 8)
         evaluator.evaluate(ops_impl)

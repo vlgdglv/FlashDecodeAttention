@@ -16,13 +16,6 @@ import mindspore.common.dtype as mstype
 
 from mindnlp.core import nn
 
-context.set_context(
-    # mode=ms.GRAPH_MODE,
-    device_target="Ascend",
-    save_graphs=False,
-    save_graphs_path="./ms_graphs"
-    )
-
 
 class FlashDecodeAttentionNet(Cell):
     def __init__(self, func, o_shape):
@@ -61,6 +54,7 @@ class FlashDecodeAttentionNet(Cell):
             func_type="aot",
             bprop=None,
             reg_info=reg_info
+            # reg_info=None
         )
 
     def construct(self,
@@ -76,16 +70,6 @@ class FlashDecodeAttentionNet(Cell):
         # print(">>> after fused_qkv")
         return attn_output
 
-from mindspore import Profiler
-from mindspore.profiler import ProfilerLevel, ProfilerActivity, AicoreMetrics
-    
-# profiler = Profiler(
-#     output_path=os.path.join("/home/ma-user/work/FlashDecodeAttention/profiler_out", "eager"),
-#     profiler_level=ProfilerLevel.Level1,
-#     activities=[ProfilerActivity.NPU],
-#     aic_metrics=AicoreMetrics.PipeUtilization,
-#     start_profile=False,
-# )
 
 def eager_calcs(query_states, key_states, value_states, o_weights):
     # query_states = query_states.to(ms.float32)
@@ -110,6 +94,25 @@ def eager_calcs(query_states, key_states, value_states, o_weights):
     attn_output = attn_output.reshape(bsz, q_len, -1)
     return attn_output
 
+ 
+from mindspore import Profiler
+from mindspore.profiler import ProfilerLevel, ProfilerActivity, AicoreMetrics
+    
+profiler = Profiler(
+    output_path=os.path.join("/home/ma-user/work/FlashDecodeAttention/profiler_out", "eager_gm_repeats"),
+    profiler_level=ProfilerLevel.Level1,
+    activities=[ProfilerActivity.NPU],
+    aic_metrics=AicoreMetrics.PipeUtilization,
+    start_profile=False,
+)   
+
+# mindspore.set_context()
+context.set_context(
+    mode=ms.GRAPH_MODE,
+    # jit_config={"jit_level": "O0"},
+    device_target="Ascend",
+    )
+
 if __name__ == "__main__":
     B, D, Dh =  1, 4096, 128
     Sq, Skv = 1, 600
@@ -121,7 +124,7 @@ if __name__ == "__main__":
     o_shape = (B, Sq, D)
 
     net = FlashDecodeAttentionNet(
-        func="FlashDecodeAttention",
+        func="aclnnFlashDecodeAttention",
         o_shape=o_shape,
     )
 
@@ -130,16 +133,17 @@ if __name__ == "__main__":
     value_states = Tensor(ms.numpy.randn(B, num_heads, Skv, Dh), mstype.bfloat16)
     o_weights = Tensor(ms.numpy.randn(D, D), mstype.bfloat16)
     
-    # profiler.start()
+    profiler.start()
     ms.runtime.synchronize()        
     t0 = time.perf_counter()
-    for _ in range(1):
-        attn_output = net(query_states, key_states, value_states, o_weights)
-        
+    for _ in range(10):
+        # attn_output = net(query_states, key_states, value_states, o_weights)
+        attn_output = eager_calcs(query_states, key_states, value_states, o_weights)
+    
     ms.runtime.synchronize()        
     t1 = time.perf_counter()
-    # profiler.stop()
-    # profiler.analyse()
+    profiler.stop()
+    profiler.analyse()
     
     memory_allocated = ms.runtime.max_memory_allocated()/10**9
     memory_reserved = ms.runtime.max_memory_reserved()/10**9

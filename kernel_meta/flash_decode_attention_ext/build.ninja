@@ -1,0 +1,19 @@
+ninja_required_version = 1.3
+cxx = g++
+
+cflags = -DMS_EXTENSION_NAME=flash_decode_attention_ext -D_GLIBCXX_USE_CXX11_ABI=0 -I/home/ma-user/anaconda3/envs/MindSpore/lib/python3.10/site-packages/mindspore -I/home/ma-user/anaconda3/envs/MindSpore/lib/python3.10/site-packages/mindspore/include -I/home/ma-user/anaconda3/envs/MindSpore/lib/python3.10/site-packages/mindspore/include/third_party -I/home/ma-user/anaconda3/envs/MindSpore/lib/python3.10/site-packages/mindspore/include/third_party/robin_hood_hashing -I/home/ma-user/anaconda3/envs/MindSpore/lib/python3.10/site-packages/mindspore/include/third_party/securec/include -I/usr/local/Ascend/ascend-toolkit/latest/include -I/home/ma-user/anaconda3/envs/MindSpore/lib/python3.10/site-packages/mindspore/include/mindspore/core/include -I/home/ma-user/anaconda3/envs/MindSpore/lib/python3.10/site-packages/mindspore/include/mindspore/core/mindrt/include -I/home/ma-user/anaconda3/envs/MindSpore/lib/python3.10/site-packages/mindspore/include/mindspore/core/mindrt -I/home/ma-user/anaconda3/envs/MindSpore/lib/python3.10/site-packages/mindspore/include/mindspore/ops -I/home/ma-user/anaconda3/envs/MindSpore/lib/python3.10/site-packages/mindspore/include/mindspore/ops/kernel/include -I/home/ma-user/anaconda3/envs/MindSpore/lib/python3.10/site-packages/mindspore/include/mindspore/ccsrc -I/home/ma-user/anaconda3/envs/MindSpore/lib/python3.10/site-packages/mindspore/include/mindspore/ccsrc/include -I/home/ma-user/anaconda3/envs/MindSpore/lib/python3.10/site-packages/mindspore/include/mindspore/ccsrc/minddata/mindrecord/include -isystem /home/ma-user/anaconda3/envs/MindSpore/include/python3.10 -fPIC -std=c++17 -fstack-protector-all -fPIC -pie -DENABLE_FAST_HASH_TABLE=1 -DCUSTOM_ASCEND_OP
+ldflags = -shared -Wl,-z,relro,-z,now,-z,noexecstack -Wl,--disable-new-dtags,--rpath -s -L/home/ma-user/anaconda3/envs/MindSpore/lib/python3.10/site-packages/mindspore/lib -lmindspore_core -lmindspore_ms_backend -lmindspore_pynative -L/home/ma-user/anaconda3/envs/MindSpore/lib/python3.10/site-packages/mindspore/lib/plugin -L/usr/local/Ascend/ascend-toolkit/latest/lib64 -lascendcl -l:libmindspore_ascend.so.2
+
+rule compile
+  command = $cxx -MMD -MF $out.d $cflags -c $in -o $out
+  depfile = $out.d
+  deps = gcc
+
+rule link
+  command = $cxx $in $ldflags -o $out
+
+build flash_decode_attention_ext.o: compile /home/ma-user/work/FlashDecodeAttention/flash_decode_attention_ext.cc
+
+build flash_decode_attention_ext.so: link flash_decode_attention_ext.o
+
+default flash_decode_attention_ext.so
